@@ -7,12 +7,15 @@ import android.graphics.Color
 import android.graphics.Matrix
 import android.graphics.PorterDuff
 import android.os.Bundle
+import android.util.Log
 import android.util.Size
 import android.widget.ImageView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
@@ -25,6 +28,9 @@ class ShadowActivity : AppCompatActivity() {
 
     private lateinit var shadowImageView: ImageView
     private lateinit var cameraExecutor: ExecutorService
+
+    private var frameCount = 0
+    private var lastFpsTimestamp = System.currentTimeMillis()
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -64,8 +70,14 @@ class ShadowActivity : AppCompatActivity() {
         cameraProviderFuture.addListener({
             val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
 
+            val resolutionSelector = ResolutionSelector.Builder()
+                .setResolutionStrategy(
+                    ResolutionStrategy(Size(640, 480), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER)
+                )
+                .build()
+
             val imageAnalysis = ImageAnalysis.Builder()
-                .setTargetResolution(Size(640, 480))
+                .setResolutionSelector(resolutionSelector)
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                 .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_YUV_420_888)
                 .build()
@@ -80,11 +92,18 @@ class ShadowActivity : AppCompatActivity() {
                         .addOnSuccessListener { result ->
                             val bitmap = result.foregroundBitmap
                             if (bitmap != null) {
-                                updateTexture(bitmap)
+                                frameCount++
+                                val currentTime = System.currentTimeMillis()
+                                if (currentTime - lastFpsTimestamp >= 1000) {
+                                    val fps = frameCount * 1000f / (currentTime - lastFpsTimestamp)
+                                    Log.d("ShadowActivity", "Current FPS: ${String.format("%.2f", fps)}")
+                                    frameCount = 0
+                                    lastFpsTimestamp = currentTime
+                                }
+                                updateTexture(bitmap, rotation)
                             }
                         }
                         .addOnFailureListener { e ->
-                            // AI processing failed
                         }
                         .addOnCompleteListener {
                             imageProxy.close()
@@ -109,17 +128,43 @@ class ShadowActivity : AppCompatActivity() {
         }, ContextCompat.getMainExecutor(this))
     }
 
-    private fun updateTexture(bitmap: Bitmap) {
-        // Mirror the bitmap horizontally so it acts like a mirror
-        val matrix = Matrix()
-        matrix.preScale(-1f, 1f)
+    private fun updateTexture(bitmap: Bitmap, rotationDegrees: Int) {
+        val viewWidth = shadowImageView.width.toFloat()
+        val viewHeight = shadowImageView.height.toFloat()
         
-        // Create mirrored bitmap
-        val mirroredBitmap = Bitmap.createBitmap(bitmap, 0, 0, bitmap.width, bitmap.height, matrix, false)
+        if (viewWidth == 0f || viewHeight == 0f) return
+
+        // Image bounds after rotation
+        val imageWidth = if (rotationDegrees % 180 == 0) bitmap.width.toFloat() else bitmap.height.toFloat()
+        val imageHeight = if (rotationDegrees % 180 == 0) bitmap.height.toFloat() else bitmap.width.toFloat()
+
+        // Calculate centerCrop scale
+        val scaleX = viewWidth / imageWidth
+        val scaleY = viewHeight / imageHeight
+        val scale = Math.max(scaleX, scaleY)
+
+        val matrix = Matrix()
+        
+        // 1. Move origin to center of bitmap
+        matrix.postTranslate(-bitmap.width / 2f, -bitmap.height / 2f)
+        
+        // 2. Rotate
+        matrix.postRotate(rotationDegrees.toFloat())
+        
+        // 3. Mirror horizontally
+        matrix.postScale(-1f, 1f)
+        
+        // 4. Scale to fit screen (centerCrop)
+        matrix.postScale(scale, scale)
+        
+        // 5. Move back to center of view
+        matrix.postTranslate(viewWidth / 2f, viewHeight / 2f)
 
         // Update ImageView on Main Thread
         runOnUiThread {
-            shadowImageView.setImageBitmap(mirroredBitmap)
+            shadowImageView.scaleType = ImageView.ScaleType.MATRIX
+            shadowImageView.imageMatrix = matrix
+            shadowImageView.setImageBitmap(bitmap)
         }
     }
 

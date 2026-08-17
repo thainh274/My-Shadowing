@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <declare-styleable name="StrokedTextView2">
+        <attr name="textStrokeColor" format="color"/>
+        <attr name="textStrokeWidth" format="dimension"/>
+        <attr name="mTextIsShadow" format="boolean"/>
+        <attr name="mTextShadowColor" format="color"/>
+        <attr name="mTextShadowDx" format="dimension"/>
+        <attr name="mTextShadowDy" format="dimension"/>
+        <attr name="textHintStrokeColor" format="color"/>
+        <attr name="textHintStrokeWidth" format="float"/>
+    </declare-styleable>
+
+    <declare-styleable name="StrokeTextView">
+        <attr name="strokeColor" format="color" />
+        <attr name="strokeWidth" format="dimension" />
+    </declare-styleable>
+</resources>

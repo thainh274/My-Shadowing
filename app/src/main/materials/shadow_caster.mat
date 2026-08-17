@@ -1,0 +1,27 @@
+material {
+    name : "ShadowCaster",
+    shadingModel : unlit,
+    blending : masked,
+    colorWrite : false,
+    depthWrite : false,
+    transparentShadow : true,
+    requires : [ uv0 ],
+    parameters : [
+        {
+            type : sampler2d,
+            name : maskTexture
+        }
+    ]
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        // The segmentation mask is a grayscale texture where the red channel has the confidence
+        float confidence = texture(materialParams_maskTexture, getUV0()).r;
+        
+        // We use masking blending. If confidence is > 0.5 (or whatever default threshold), it's opaque for shadows.
+        // If not, it's transparent.
+        material.baseColor = vec4(1.0, 1.0, 1.0, confidence);
+    }
+}

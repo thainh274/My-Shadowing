@@ -3,7 +3,6 @@ package com.enn.chi.shadow.myshadowing
 import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
-import android.graphics.Matrix
 import android.os.Bundle
 import android.util.Log
 import android.util.Size
@@ -15,7 +14,7 @@ import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.resolutionselector.ResolutionSelector
 import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
@@ -23,10 +22,11 @@ import androidx.compose.material3.Surface
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.FilterQuality
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.unit.IntSize
 import androidx.core.content.ContextCompat
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.segmentation.Segmentation
@@ -39,22 +39,27 @@ private const val TAG = "ShadowDebug"
 class ShadowActivity : ComponentActivity() {
 
     private lateinit var cameraExecutor: ExecutorService
-    private var currentBitmap by mutableStateOf<Bitmap?>(null)
+    
+    // TỐI ƯU 1: Zero-copy Memory (Giải quyết GC Pressure, giữ FPS ổn định)
+    private var reusableBitmap: Bitmap? = null
+    private var reusablePixels: IntArray? = null
+    
+    // TỐI ƯU 2: Trạng thái ép Jetpack Compose vẽ lại (Recompose)
+    // Bằng cách bọc lại ImageBitmap mới mỗi frame, Compose sẽ tự động nhận diện thay đổi
+    private var currentImageBitmap by mutableStateOf<ImageBitmap?>(null)
+
     private var segFrameCount = 0
     private var segLastTime = System.currentTimeMillis()
 
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
-        if (isGranted) {
-            startCameraAndAI()
-        }
+        if (isGranted) startCameraAndAI()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         cameraExecutor = Executors.newSingleThreadExecutor()
-        Log.d(TAG, "=== ShadowActivity onCreate (2D Phase 1) ===")
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCameraAndAI()
@@ -68,28 +73,26 @@ class ShadowActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = Color.White
                 ) {
-                    ShadowScene2D(currentBitmap)
+                    ShadowScene2D(currentImageBitmap)
                 }
             }
         }
     }
 
-
-
     @androidx.annotation.OptIn(androidx.camera.core.ExperimentalGetImage::class)
     private fun startCameraAndAI() {
         val options = SelfieSegmenterOptions.Builder()
             .setDetectorMode(SelfieSegmenterOptions.STREAM_MODE)
-            // Không dùng enableRawSizeMask() để ML Kit tự động xoay mask thành chiều dọc theo rotationDegrees
             .build()
         val segmenter = Segmentation.getClient(options)
-        Log.d(TAG, "ML Kit segmenter initialized")
 
         val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
         cameraProviderFuture.addListener({
             val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
 
+            // Giữ phân giải 480x360 để tối đa FPS cho Camera/AI. 
+            // Việc làm nét hình sẽ được xử lý bằng GPU ở bước Render.
             val resolutionSelector = ResolutionSelector.Builder()
                 .setResolutionStrategy(
                     ResolutionStrategy(Size(480, 360), ResolutionStrategy.FALLBACK_RULE_CLOSEST_LOWER)
@@ -109,22 +112,33 @@ class ShadowActivity : ComponentActivity() {
                     val image = InputImage.fromMediaImage(mediaImage, rotation)
 
                     segmenter.process(image)
-                        .addOnSuccessListener { mask ->
+                        // TỐI ƯU 3: Ép chạy trên cameraExecutor để tránh giật lag UI Main Thread
+                        .addOnSuccessListener(cameraExecutor) { mask ->
                             val buffer = mask.buffer
                             val width = mask.width
                             val height = mask.height
+                            val totalPixels = width * height
                             
-                            // Convert float confidence mask to ARGB_8888 bitmap
-                            val pixels = IntArray(width * height)
-                            buffer.rewind()
-                            for (i in pixels.indices) {
-                                val confidence = buffer.float
-                                // 0xFF000000 is solid black, 0x00000000 is transparent
-                                pixels[i] = if (confidence > 0.5f) 0xFF000000.toInt() else 0x00000000
+                            // Chỉ cấp phát bộ nhớ đúng 1 lần duy nhất (Khử hoàn toàn tạo rác GC)
+                            if (reusablePixels == null || reusablePixels!!.size != totalPixels) {
+                                reusablePixels = IntArray(totalPixels)
+                                reusableBitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                             }
                             
-                            // Bitmap sẽ tự động có hướng dọc (portrait) vì ML Kit đã xoay theo rotation
-                            val bitmap = Bitmap.createBitmap(pixels, width, height, Bitmap.Config.ARGB_8888)
+                            val pixels = reusablePixels!!
+                            buffer.rewind()
+                            
+                            // TỐI ƯU 4: Soft Edges - Khử dứt gãy viền và giữ lại các cử động nhanh
+                            for (i in 0 until totalPixels) {
+                                val confidence = buffer.float
+                                // Ép confidence (0..1) sang Alpha (0..255)
+                                val alpha = (confidence * 255f).toInt().coerceIn(0, 255)
+                                // Màu Đen tuyệt đối (RGB=0). Đẩy Alpha vào 8 bit cao nhất.
+                                pixels[i] = alpha shl 24 
+                            }
+                            
+                            // Ghi đè pixel vào Bitmap cũ cực nhanh
+                            reusableBitmap!!.setPixels(pixels, 0, width, 0, 0, width, height)
                             
                             segFrameCount++
                             val now = System.currentTimeMillis()
@@ -133,14 +147,13 @@ class ShadowActivity : ComponentActivity() {
                                 segFrameCount = 0
                                 segLastTime = now
                             }
-                            currentBitmap = bitmap
+                            
+                            // Ép Compose UI vẽ lại khung hình mới bằng cách cấp phát wrapper ImageBitmap mới. 
+                            // Wrapper này cực kì nhẹ (chỉ tốn vài byte reference) nên không lo rác GC.
+                            currentImageBitmap = reusableBitmap!!.asImageBitmap()
                         }
-                        .addOnFailureListener { e ->
-                            Log.e(TAG, "[SEG] FAILED: ${e.message}")
-                        }
-                        .addOnCompleteListener {
-                            imageProxy.close()
-                        }
+                        .addOnFailureListener { e -> Log.e(TAG, "[SEG] FAILED: ${e.message}") }
+                        .addOnCompleteListener { imageProxy.close() }
                 } else {
                     imageProxy.close()
                 }
@@ -153,7 +166,6 @@ class ShadowActivity : ComponentActivity() {
             try {
                 cameraProvider.unbindAll()
                 cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
-                Log.d(TAG, "Camera bound successfully")
             } catch(exc: Exception) {
                 Log.e(TAG, "Use case binding failed", exc)
             }
@@ -164,13 +176,14 @@ class ShadowActivity : ComponentActivity() {
     override fun onDestroy() {
         super.onDestroy()
         cameraExecutor.shutdown()
+        reusableBitmap?.recycle()
     }
 }
 
 @Composable
-fun ShadowScene2D(bitmap: Bitmap?) {
-    var renderFrameCount by remember { mutableStateOf(0) }
-    var renderLastTime by remember { mutableStateOf(System.currentTimeMillis()) }
+fun ShadowScene2D(imageBitmap: ImageBitmap?) {
+    var renderFrameCount by remember { mutableIntStateOf(0) }
+    var renderLastTime by remember { mutableLongStateOf(System.currentTimeMillis()) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -178,7 +191,7 @@ fun ShadowScene2D(bitmap: Bitmap?) {
                 renderFrameCount++
                 val now = System.currentTimeMillis()
                 if (now - renderLastTime >= 1000) {
-                    Log.d(TAG, "[RENDER] fps=$renderFrameCount bitmap=${bitmap != null} size=${bitmap?.let { "${it.width}x${it.height}" } ?: "null"}")
+                    Log.d(TAG, "[RENDER] fps=$renderFrameCount")
                     renderFrameCount = 0
                     renderLastTime = now
                 }
@@ -187,17 +200,19 @@ fun ShadowScene2D(bitmap: Bitmap?) {
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        if (bitmap != null) {
-            Image(
-                bitmap = bitmap.asImageBitmap(),
-                contentDescription = "Shadow silhouette",
-                contentScale = ContentScale.Crop,
-                // The bitmap is already solid black from the segmentation mask processing
-                colorFilter = null,
+        if (imageBitmap != null) {
+            // TỐI ƯU 5: Dùng Canvas nội suy phần cứng GPU (High Quality)
+            Canvas(
                 modifier = Modifier
                     .fillMaxSize()
-                    .graphicsLayer(scaleX = -1f)
-            )
+                    .graphicsLayer(scaleX = -1f) // Lật gương
+            ) {
+                drawImage(
+                    image = imageBitmap,
+                    dstSize = IntSize(size.width.toInt(), size.height.toInt()),
+                    filterQuality = FilterQuality.High // Khử răng cưa và mảng ô vuông cực hiệu quả
+                )
+            }
         }
     }
 }

@@ -1,7 +1,8 @@
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
-    id("kotlin-kapt")
+    alias(libs.plugins.kotlin.compose.compiler)
+
 }
 
 android {
@@ -31,13 +32,13 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
+
     buildFeatures{
         viewBinding = true
         buildConfig = true
+        compose = true
     }
+
 }
 
 dependencies {
@@ -46,6 +47,16 @@ dependencies {
     implementation(libs.androidx.constraintlayout)
     implementation(libs.androidx.core.ktx)
     implementation(libs.material)
+    
+    val composeBom = platform(libs.compose.bom)
+    implementation(composeBom)
+    androidTestImplementation(composeBom)
+    
+    implementation(libs.compose.ui)
+    implementation(libs.compose.ui.tooling.preview)
+    implementation(libs.compose.material3)
+    implementation(libs.activity.compose)
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
@@ -57,11 +68,12 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:${camerax_version}")
     implementation("androidx.camera:camera-view:${camerax_version}")
 
-    // ML Kit Subject Segmentation
-    implementation("com.google.android.gms:play-services-mlkit-subject-segmentation:16.0.0-beta1")
+    // ML Kit Selfie Segmentation
+    implementation("com.google.mlkit:segmentation-selfie:16.0.0-beta6")
 
     // Sceneview (Filament wrapper)
-    implementation("io.github.sceneview:sceneview:2.0.3")
+    implementation(libs.sceneview)
+
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

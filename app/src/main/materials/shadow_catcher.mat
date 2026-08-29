@@ -1,0 +1,15 @@
+material {
+    name : "ShadowCatcher",
+    shadingModel : lit,
+    blending : transparent,
+    shadowMultiplier : true,
+    colorWrite : true,
+    depthWrite : false
+}
+
+fragment {
+    void material(inout MaterialInputs material) {
+        prepareMaterial(material);
+        material.baseColor = vec4(0.0, 0.0, 0.0, 1.0);
+    }
+}
